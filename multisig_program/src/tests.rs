@@ -97,6 +97,15 @@ fn pr(i: u64) -> AccountMeta {
 }
 
 /// A native transfer of `amount` out of the vault to `to`.
+/// Execute's rows: the state, the proposal, then the call's own rows.
+fn exec_rows(i: u64, call: &TargetCall) -> Vec<AccountMeta> {
+    let mut rows = vec![st(), pr(i)];
+    for (a, p) in &call.shard_selectors {
+        rows.push(AccountMeta::new(AccountId::new(*a), false, AccountId::new(*p)));
+    }
+    rows
+}
+
 fn transfer_out(to: [u8; 32], amount: u128) -> TargetCall {
     let native = [0_u8; 32];
     let mut ins = vec![0_u8];
@@ -157,13 +166,13 @@ fn execute() {
     let call = transfer_out([8; 32], 100);
     tx(&mut s, vec![st(), pr(1), signer_row(A, true)], Instruction::Propose { create_key: CK, index: 1, target: call.clone() }).unwrap();
     // one approval is short of the threshold
-    refused(tx(&mut s, vec![st(), pr(1)], Instruction::Execute { create_key: CK, index: 1, approvers: vec![A], call: call.clone() }), "threshold");
+    refused(tx(&mut s, exec_rows(1, &call.clone()), Instruction::Execute { create_key: CK, index: 1, approvers: vec![A], call: call.clone() }), "threshold");
     // naming someone who did not approve does not help
-    refused(tx(&mut s, vec![st(), pr(1)], Instruction::Execute { create_key: CK, index: 1, approvers: vec![A, B], call: call.clone() }), "did not approve");
+    refused(tx(&mut s, exec_rows(1, &call.clone()), Instruction::Execute { create_key: CK, index: 1, approvers: vec![A, B], call: call.clone() }), "did not approve");
     tx(&mut s, vec![st(), pr(1), signer_row(B, true)], Instruction::Approve { create_key: CK, index: 1 }).unwrap();
     // a substituted call (another recipient) is not the one committed
-    refused(tx(&mut s, vec![st(), pr(1)], Instruction::Execute { create_key: CK, index: 1, approvers: vec![A, B], call: transfer_out([6; 32], 100) }), "commits to");
-    let calls = tx(&mut s, vec![st(), pr(1)], Instruction::Execute { create_key: CK, index: 1, approvers: vec![A, B], call: call.clone() }).unwrap();
+    refused(tx(&mut s, exec_rows(1, &transfer_out([6; 32], 100)), Instruction::Execute { create_key: CK, index: 1, approvers: vec![A, B], call: transfer_out([6; 32], 100) }), "commits to");
+    let calls = tx(&mut s, exec_rows(1, &call.clone()), Instruction::Execute { create_key: CK, index: 1, approvers: vec![A, B], call: call.clone() }).unwrap();
     assert_eq!(proposal(&s, 1).status, ProposalStatus::Executed);
     assert_eq!(calls.len(), 1);
     let c = &calls[0];
@@ -172,7 +181,11 @@ fn execute() {
     assert_eq!(c.instruction_data, call.instruction_data);
     assert_eq!(*c.pda_seeds[0].as_bytes(), vault_seed(&CK), "authorizes the vault");
     // once only
-    refused(tx(&mut s, vec![st(), pr(1)], Instruction::Execute { create_key: CK, index: 1, approvers: vec![A, B], call }), "no longer active");
+    refused(tx(&mut s, exec_rows(1, &call), Instruction::Execute { create_key: CK, index: 1, approvers: vec![A, B], call: call.clone() }), "no longer active");
+    // the rows after the proposal must be exactly the call's: a chained call selects from them
+    let mut rows = exec_rows(1, &call);
+    rows[3] = AccountMeta::new(AccountId::new([6; 32]), false, AccountId::new([0; 32]));
+    refused(tx(&mut s, rows, Instruction::Execute { create_key: CK, index: 1, approvers: vec![A, B], call }), "not the call's");
 }
 
 #[test]
@@ -183,7 +196,7 @@ fn only_its_own_vault() {
     let mut call = transfer_out([8; 32], 100);
     call.pda_seeds = vec![vault_seed(&[10; 32])];
     refused(tx(&mut s, vec![st(), pr(1), signer_row(A, true)], Instruction::Propose { create_key: CK, index: 1, target: call.clone() }), "its own multisig's vault");
-    refused(tx(&mut s, vec![st(), pr(1)], Instruction::Execute { create_key: CK, index: 1, approvers: vec![A, B], call }), "its own multisig's vault");
+    refused(tx(&mut s, exec_rows(1, &call), Instruction::Execute { create_key: CK, index: 1, approvers: vec![A, B], call }), "its own multisig's vault");
 }
 
 #[test]
@@ -199,7 +212,7 @@ fn config_and_current_members() {
     tx(&mut s, vec![st(), pr(2)], Instruction::ExecuteConfig { create_key: CK, index: 2, approvers: vec![A, B], action: remove }).unwrap();
     assert_eq!((state(&s).members.clone(), state(&s).member_count), (vec![A, B], 2));
     // C's approval of #1 no longer counts: C is not a current member
-    refused(tx(&mut s, vec![st(), pr(1)], Instruction::Execute { create_key: CK, index: 1, approvers: vec![A, C], call: call.clone() }), "not a current member");
+    refused(tx(&mut s, exec_rows(1, &call.clone()), Instruction::Execute { create_key: CK, index: 1, approvers: vec![A, C], call: call.clone() }), "not a current member");
     // the threshold can change, within the members
     let t = ConfigAction::ChangeThreshold { new_threshold: 1 };
     tx(&mut s, vec![st(), pr(3), signer_row(A, true)], Instruction::ProposeConfig { create_key: CK, index: 3, action: t.clone() }).unwrap();
@@ -207,7 +220,7 @@ fn config_and_current_members() {
     tx(&mut s, vec![st(), pr(3)], Instruction::ExecuteConfig { create_key: CK, index: 3, approvers: vec![A, B], action: t }).unwrap();
     assert_eq!(state(&s).threshold, 1);
     // now A alone executes #1
-    tx(&mut s, vec![st(), pr(1)], Instruction::Execute { create_key: CK, index: 1, approvers: vec![A], call }).unwrap();
+    tx(&mut s, exec_rows(1, &call), Instruction::Execute { create_key: CK, index: 1, approvers: vec![A], call }).unwrap();
     // a config action is held to what was proposed, too
     let add = ConfigAction::AddMember { new_member: OUTSIDER };
     tx(&mut s, vec![st(), pr(4), signer_row(A, true)], Instruction::ProposeConfig { create_key: CK, index: 4, action: add }).unwrap();

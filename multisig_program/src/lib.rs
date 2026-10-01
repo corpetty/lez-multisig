@@ -91,9 +91,21 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
         Instruction::Approve { create_key, index } => vote(&mut plan, input, create_key, index, true),
         Instruction::Reject { create_key, index } => vote(&mut plan, input, create_key, index, false),
         Instruction::Execute { create_key, index, approvers, call } => {
-            assert_eq!(rows.len(), 2, "Execute takes two rows, the state and the proposal");
+            // the chained call's shards are selected from this transaction's rows, so they
+            // follow the state and the proposal, in the call's own order
+            assert_eq!(
+                rows.len(),
+                2 + call.shard_selectors.len(),
+                "Execute takes the state, the proposal, then the call's rows"
+            );
             own(input, &rows[0], state_pda(&me, &create_key), "state");
             own(input, &rows[1], proposal_pda(&me, &create_key, index), "proposal");
+            for (row, (a, p)) in rows[2..].iter().zip(&call.shard_selectors) {
+                assert!(
+                    row.account_id.value() == a && row.program_account_id.value() == p,
+                    "a row is not the call's"
+                );
+            }
             check_target(&create_key, &call);
             let commitment = Commitment::Call(call.clone()).hash();
             plan.effect(&rows[0], &Effect::Quorum { approvers: approvers.clone() });

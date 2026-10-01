@@ -180,8 +180,8 @@ pub enum Instruction {
     Approve { create_key: [u8; 32], index: u64 },
     /// A member rejects. Rows: [state, proposal, voter].
     Reject { create_key: [u8; 32], index: u64 },
-    /// Run the proposal's call, naming the approvers counted. Rows: [state, proposal]. The
-    /// call's own rows follow in the chained call, not here.
+    /// Run the proposal's call, naming the approvers counted. Rows: [state, proposal, then
+    /// the call's own rows in its order] — a chained call selects its shards from these.
     Execute { create_key: [u8; 32], index: u64, approvers: Vec<Member>, call: TargetCall },
     /// Apply the proposal's config change, naming the approvers counted. Rows: [state, proposal].
     ExecuteConfig { create_key: [u8; 32], index: u64, approvers: Vec<Member>, action: ConfigAction },
