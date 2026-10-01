@@ -1,248 +1,80 @@
 # LEZ Multisig — M-of-N On-Chain Governance
 
-An M-of-N multisig governance program for the [Logos Execution Zone (LEZ)](https://github.com/logos-blockchain/logos-execution-zone). Inspired by [Squads Protocol v4](https://squads.so/) — proposals live on-chain as separate PDA accounts. Signers approve asynchronously, no offline coordination needed.
+An M-of-N multisig governance program for the [Logos Execution Zone (LEZ)](https://github.com/logos-blockchain/logos-execution-zone). Inspired by [Squads Protocol v4](https://squads.so/): proposals live on-chain as separate PDA accounts, and members approve asynchronously, each in their own transaction.
 
-📄 **[Technical Specification](SPEC.md)** · 📋 **[Demo Runbook](scripts/DEMO-RUNBOOK.md)**
+**This branch targets LEZ v0.3.0**, the line the public testnet runs since 2026-09-30. LEZ v0.3.0 replaced the program ABI: a program is now a pair, `run_program(plan, apply)`. `plan` sees the instruction and each row's account id, authorization and program shard, but no account data, and it emits one effect per shard. `apply` sees one shard's data and checks or changes it. SPEL generates code for the old stateful ABI, so this port is a plain v0.3 program, like LEZ's own token program. The SPEL-based crates (`cli/`, `idl-gen/`, `lez-multisig-ffi/`, `e2e_tests/`) are out of the workspace until SPEL supports v0.3.
 
-## How It Works
+The v0.2.4 program (SPEL v0.7.0) is on `main`, at ImageID `2ced3d30…d4c7` on the v0.2.4 testnet.
 
-```
-CreateMultisig → Propose → Approve (×M) → Execute → ChainedCall to target program
-```
-
-1. **Create** a multisig with N members, threshold M, and a unique `create_key`
-2. **Propose** an action — stores a serialized instruction + target program ID in a proposal PDA, auto-approves the proposer
-3. **Approve** — other members approve independently, each in their own transaction
-4. **Execute** — once M approvals collected, emits a `ChainedCall` to the target program
-5. **Reject** — members can reject; if rejections ≥ (N - M + 1), the proposal is dead
-
-**Targets LEZ v0.2.4 / SPEL v0.7.0**, the line the public testnet (`https://testnet.lez.logos.co`) runs. A proposal commits the ids of the accounts its call will touch, and `Execute` refuses any other accounts (#40).
-
-### Deployments
-
-| Network | ImageID (program id) | Deployed |
-|---|---|---|
-| LEZ testnet (v0.2.4) | `2ced3d301a4d1cd5db6cad9c428b9f3463155073f8bacf73179c6ea6536de4c7` | tx `61a7abe2cfeddeae3cd54f23317f50e984eb331f420d013210e7eabcc896faa0`, block 23405 |
-
-The ImageID is reproducible: `make build`, or `RISC0_DOCKER_CONTAINER_TAG=r0.1.91.1 cargo risczero build --manifest-path methods/guest/Cargo.toml`, builds in the `risczero/risc0-guest-builder:r0.1.91.1` image, as CI does. The same guest bytes give the same id, and so the same PDAs. risc0-build's own default image (`r0.1.88.0`) is too old for this dependency tree.
-
-**Key design:** The multisig never executes actions directly. It delegates via LEZ `ChainedCall` — the proposal stores a serialized instruction (encoded from any program's IDL), which is delivered to the target program on execute. This makes multisig governance **composable with any LEZ program**.
-
-## Project Structure
+## How it works
 
 ```
-lez-multisig-framework/
-├── multisig_core/           — shared types, instructions, PDA derivation
-├── multisig_program/        — on-chain handlers (risc0 guest)
-│   └── src/
-│       ├── lib.rs           — instruction dispatch
-│       ├── create_multisig.rs
-│       ├── propose.rs
-│       ├── approve.rs
-│       ├── reject.rs
-│       └── execute.rs
-├── methods/                 — risc0 zkVM guest build config
-├── cli/                     — thin CLI wrapper around lez-cli (IDL-driven)
-├── idl-gen/                 — IDL generator (host-side, no risc0)
-├── lez-multisig-ffi/        — FFI client + generated IDL
-├── e2e_tests/               — integration tests against live sequencer
-├── scripts/
-│   ├── demo-full-flow.sh    — full end-to-end demo script
-│   └── DEMO-RUNBOOK.md      — manual CLI runbook for live presentation
-├── SPEC.md                  — full technical specification
-├── FURPS.md                 — requirements specification
-├── ADR.md                   — architecture decision records
-└── docs/
+CreateMultisig → Propose → Approve (×M) → Execute { approvers, call } → the call, chained
 ```
 
-## Quick Start
+1. **Create** a multisig: N members, threshold M, and a unique `create_key`. The creator's own transaction pays its fee. Members need no setup, and any funded account can be one.
+2. **Propose** a call or a config change, as the next proposal index. The proposal commits to one `Commitment`. A call commits to the target program's account id, every row it touches as an (account, program shard) pair, its instruction bytes, and its PDA seeds. The proposer's vote counts.
+3. **Approve** or **Reject**: each member votes in their own transaction, and pays for it.
+4. **Execute** names the approvers it counts and carries the call. The proposal's `apply` refuses unless the call hashes to its commitment and every named approver approved it. The state's `apply` refuses unless they are distinct **current** members, at least M of them. The call then runs, chained from `plan`, and the proposal is Executed. **ExecuteConfig** does the same for a config change (add or remove a member, change the threshold).
 
-### Prerequisites
+Because the rows are committed, a recipient cannot be substituted at Execute. The PDA seeds a call carries can only be this multisig's own vault seed. The vault holds native LEZ in its native shard, and anyone funds it by an ordinary transfer to its id.
 
-- Rust 1.94.0 (pinned in `rust-toolchain.toml`, same as LEZ v0.2.4 and SPEL v0.7.0)
-- [Risc0 toolchain](https://dev.risczero.com/api/zkvm/install): `curl -L https://risczero.com/install | bash && rzup install`
-- Docker (for reproducible guest builds)
-- Clone of [logos-execution-zone](https://github.com/logos-blockchain/logos-execution-zone) at `v0.2.4` (sequencer + wallet; the token program binary ships at `artifacts/lez/programs/token.bin`)
-- Host libraries: `libpcsclite-dev` (the v0.2.4 wallet links Keycard support). The sequencer also needs `libclang` for RocksDB's bindgen, and `r0vm` 3.0.5 on `PATH` to run genesis
+**On v0.3 a refused transaction is still included.** It reverts, keeps its fee, and burns its signers' nonces. The sequencer's RPC reports no outcome, so a client judges each step by the state it reads back, never by inclusion. A refusal is billed its whole gas limit: on a local zone, a refused vote cost 16,003,672 base units, and an accepted approval 456,112.
 
-### Important: Member Accounts
+## Accounts
 
-Members must use **fresh keypairs** (never-used accounts with nonce=0) for each multisig. During `CreateMultisig`, all member accounts are **claimed** by the multisig program (`program_owner = multisig_program_id`). This is required by LEZ validation rules.
+| account | seed | shard | holds |
+|---|---|---|---|
+| state | `create_key` | the program's | `MultisigState { create_key, threshold, member_count, members, transaction_index }` |
+| proposal #i | SHA-256(`"multisig_prop___"` ‖ create_key ‖ i LE) | the program's | `Proposal { index, proposer, create_key, commitment, approved, rejected, status }` |
+| vault | SHA-256(`"multisig_vault__"` ‖ create_key) | the native token's | native LEZ |
 
-### 1. Build the guest binary
+Every PDA is `AccountId::for_public_pda(P, seed)`: SHA-256(`"/LEE/v0.2/AccountId/PDA/"` padded ‖ P ‖ seed). Here `P` is the program's account id, which is its deployment header account on v0.3. Strings in seeds are zero-padded to 32 bytes, and several seeds are combined by SHA-256, as SPEL did.
+
+Rows, in order:
+- **CreateMultisig:** the state.
+- **Propose, ProposeConfig, Approve and Reject:** the state, the proposal, then the signing member.
+- **Execute:** the state, the proposal, then the call's own rows in order. A chained call can select only rows its transaction carries.
+- **ExecuteConfig:** the state and the proposal.
+
+## Project structure
+
+```
+multisig_core/      — the types: state, proposal, commitment, instructions, effects, PDAs
+multisig_program/   — plan + apply, and in-process tests of every rule (src/tests.rs)
+methods/            — the risc0 guest: run_program(plan, apply)
+e2e_v03/            — the end-to-end test against a running v0.3 sequencer, and the client vectors (src/bin/vectors.rs)
+```
+
+## Build, test, deploy
+
+Needs Rust 1.98.1 (`rust-toolchain.toml`, as LEZ v0.3.0) and risc0's guest toolchain (`rzup install rust 1.91.1`). The host side links RocksDB and risc0's circuit kernels, so it also needs a C++ compiler and `libclang`.
 
 ```bash
-# Build the zkVM guest — requires Docker, ~15-20 min on first run
-RISC0_DOCKER_CONTAINER_TAG=r0.1.91.1 cargo risczero build --manifest-path methods/guest/Cargo.toml   # or: make build
+# every plan/apply rule, in process (no zkVM)
+RISC0_SKIP_BUILD=1 cargo test -p multisig_program
 
-# Verify
-ls target/riscv32im-risc0-zkvm-elf/docker/multisig.bin
+# the guest: target/riscv-guest/multisig-methods/multisig-guest/riscv32im-risc0-zkvm-elf/release/multisig.bin
+cargo build --release -p multisig-methods
+
+# deploy through program_loader with LEZ's wallet CLI: the user ELF in 96 KiB segments,
+# one fresh account each, then a header account naming them; the header's id is the
+# program's account id
+wallet program-loader deploy --elf multisig.bin --header Public/<header> --segments Public/<s1> … --payer Public/<funded>
+
+# end to end on a running sequencer: <fund command> is run as `<cmd> <account hex> <amount>`
+cargo run --release -p e2e_v03 -- http://127.0.0.1:3040 <program account> "<fund command>"
 ```
 
-### 2. Generate the IDL
+The e2e creates a 2-of-3, funds its vault, proposes a native transfer out of it, and approves it. It checks four refusals, each with state unchanged: an outsider's vote, a substituted recipient, another multisig naming this vault's seed, and a second Execute. It also executes the transfer. Every step is judged by the state read back.
 
-```bash
-# Regenerate from Rust source whenever instruction types change
-cargo run -p lez-multisig-idl-gen > lez-multisig-ffi/src/multisig_idl.json
-# or: make generate   (IDL + FFI client via spel-client-gen)
-```
-
-### 3. Run unit tests
-
-```bash
-cargo test -p multisig_core -p multisig_program
-```
-
-### 4. Run the full demo
-
-The demo script runs a complete flow against a local sequencer: deploy → register → create multisig → propose member additions → execute → token governance via ChainedCall.
-
-```bash
-# Terminal 1: start a local sequencer (logos-execution-zone v0.2.4)
-cd logos-execution-zone/lez/sequencer/service
-RUST_LOG=info cargo run --release --features standalone -p sequencer_service -- \
-  configs/debug/sequencer_config.json
-
-# Terminal 2: run demo (set LSSA_DIR and REGISTRY_DIR first)
-export LSSA_DIR=/path/to/lssa
-export REGISTRY_DIR=/path/to/lez-registry
-bash scripts/demo-full-flow.sh
-```
-
-See [scripts/DEMO-RUNBOOK.md](scripts/DEMO-RUNBOOK.md) for a manual step-by-step version.
-
-### 5. Run e2e tests
-
-```bash
-# Requires a running sequencer (above) + the token binary
-export TOKEN_PROGRAM=/path/to/logos-execution-zone/artifacts/lez/programs/token.bin
-export MULTISIG_PROGRAM=$PWD/target/riscv32im-risc0-zkvm-elf/docker/multisig.bin
-cargo test -p lez-multisig-e2e -- --nocapture --test-threads=1
-
-# Against the public testnet, allow for its block time:
-SEQUENCER_URL=https://testnet.lez.logos.co BLOCK_WAIT_SECS=60 \
-  cargo test -p lez-multisig-e2e -- --nocapture --test-threads=1
-```
-
-## On-Chain State
-
-See [SPEC.md](SPEC.md) for full details.
-
-### Accounts
-
-| Account | PDA Seed | Purpose |
-|---------|----------|---------|
-| Multisig State | `"multisig_state__" XOR create_key` | Config: members, threshold, tx counter |
-| Proposal | `"multisig_prop___" XOR create_key XOR index` | Single proposal: action + votes |
-| Vault | `"multisig_vault__" XOR create_key` | Holds assets controlled by multisig |
-
-All PDAs: `AccountId = SHA256(program_id ‖ seed)`
-
-**Derive any PDA from the CLI:**
-```bash
-multisig --idl multisig_idl.json --program-id <HEX> pda vault --create-key demo-abc
-multisig --idl multisig_idl.json --program-id <HEX> pda multisig-state --create-key demo-abc
-```
-
-### Instructions
-
-| Instruction | Accounts | Description |
-|---|---|---|
-| `CreateMultisig` | `[state_pda, member1..N]` | Initialize multisig, claim member accounts |
-| `Propose` | `[state_pda, proposer, proposal_pda]` | Create proposal, auto-approve proposer |
-| `Approve` | `[state_pda, approver, proposal_pda]` | Add approval to proposal |
-| `Reject` | `[state_pda, rejector, proposal_pda]` | Add rejection to proposal |
-| `Execute` | `[state_pda, executor, proposal_pda, ...targets]` | Execute approved proposal via ChainedCall |
-
-## CLI
-
-The `cli/` crate wraps [`lez-cli`](https://github.com/jimmy-claw/lez-framework), which auto-generates subcommands from the multisig IDL. All flags are derived from the IDL — no hardcoded commands.
-
-```bash
-# Build the CLI
-cargo build -p multisig-cli
-
-# View available commands (IDL-driven)
-./target/debug/multisig --idl lez-multisig-ffi/src/multisig_idl.json --help
-
-# Derive a PDA (no binary needed)
-./target/debug/multisig --idl lez-multisig-ffi/src/multisig_idl.json \
-  --program-id <64-char-hex> pda vault --create-key my-multisig
-
-# Create a multisig (dry-run)
-./target/debug/multisig --idl lez-multisig-ffi/src/multisig_idl.json \
-  --program multisig.bin --dry-run \
-  create-multisig \
-    --create-key my-multisig \
-    --threshold 2 \
-    --members <member1_hex>,<member2_hex>,<member3_hex> \
-    --member-accounts-account <m1_id> \
-    --member-accounts-account <m2_id> \
-    --member-accounts-account <m3_id>
-
-# Propose a cross-program action (using target program's IDL)
-# First serialize the target instruction (dry-run):
-./target/debug/multisig --idl scripts/token-idl.json \
-  --program token.bin --dry-run \
-  transfer --amount-to-transfer 200
-# Then propose using the serialized bytes:
-./target/debug/multisig --idl lez-multisig-ffi/src/multisig_idl.json \
-  --program multisig.bin \
-  propose \
-    --multisig-state-account <state_pda> \
-    --proposer-account <signer_id> \
-    --proposal-account <fresh_account> \
-    --target-program-id <token_program_id_hex> \
-    --target-instruction-data <u32_words_csv> \
-    --target-account-count 2 \
-    --pda-seeds <vault_seed_hex> \
-    --authorized-indices 0
-```
-
-## Cross-Program Governance
-
-The multisig can govern **any LEZ program** via ChainedCall. The proposal stores:
-- `target_program_id` — which program to call
-- `target_instruction_data` — serialized instruction bytes (from the target program's IDL)
-- `target_account_count` — how many accounts the ChainedCall needs
-- `pda_seeds` — seeds for PDA accounts the multisig owns (e.g. vault)
-
-This means you can use lez-cli with any program's IDL to generate the instruction bytes, then wrap them in a multisig proposal — without writing any code.
-
-## Known Issues
-
-- [ ] No `CloseProposal` instruction yet (executed/rejected proposals stay on-chain)
-- [ ] No GUI — Basecamp Qt module planned for v0.2
-
-## Dependencies
-
-### v0.1
-
-| Component | Role |
-|---|---|
-| [LEZ (logos-execution-zone)](https://github.com/logos-blockchain/logos-execution-zone) | Runtime: ChainedCall, PDA derivation, account ownership, nonce replay protection, wallet, sequencer |
-| [lez-programs](https://github.com/logos-blockchain/lez-programs) | Token program — primary ChainedCall target |
-| [spel](https://github.com/logos-co/spel) | spel-framework (IDL macros, account model in program + FFI), spel-client-gen (code generation) |
-| [spelbook / lez-registry](https://github.com/jimmy-claw/spelbook) | Program registry — used in demo scripts for program discovery |
-| [RISC0 zkVM](https://github.com/risc0/risc0) | Guest program execution environment |
-
-### v0.2
-
-| Component | Role |
-|---|---|
-| [spel-client-gen](https://github.com/logos-co/spel) | Generates Basecamp Qt module (backend, plugin, QML scaffold) from IDL |
-| [spelbook](https://github.com/jimmy-claw/spelbook) | Full integration — program ID → IDL lookup for human-readable proposal decode/encode in UI |
-| Logos Messaging | In-band signing notifications; required for private TX flow |
+`cargo run --release -p e2e_v03 --bin vectors` prints, from `multisig_core` itself, the borsh bytes of a state, a call proposal, a config proposal and every instruction, plus the PDAs, for clients to be held to.
 
 ## References
 
-- [Technical Specification (SPEC.md)](SPEC.md)
-- [FURPS Requirements (FURPS.md)](FURPS.md)
-- [Architecture Decisions (ADR.md)](ADR.md)
-- [Demo Runbook (scripts/DEMO-RUNBOOK.md)](scripts/DEMO-RUNBOOK.md)
-- [LEZ (logos-execution-zone)](https://github.com/logos-blockchain/logos-execution-zone)
-- [lez-programs](https://github.com/logos-blockchain/lez-programs)
-- [Squads Protocol v4](https://squads.so/) — design inspiration
+- [LEZ (logos-execution-zone)](https://github.com/logos-blockchain/logos-execution-zone), v0.3.0: `lee/state_machine/core/src/program/` (the plan/apply ABI), `native_token.rs` (a v0.3 program of the same shape)
+- [SPEC.md](SPEC.md), [FURPS.md](FURPS.md), [ADR.md](ADR.md): the v0.2.x design this port carries over
+- [Squads Protocol v4](https://squads.so/): design inspiration
 
 ## Disclaimer
 
