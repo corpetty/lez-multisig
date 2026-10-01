@@ -1,10 +1,9 @@
 [package]
 name = "multisig_core"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
-nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.4", package = "lee_core" }
-serde = { version = "1.0", default-features = false, features = ["derive"] }
-borsh = "1.5.7"
-spel-framework = { git = "https://github.com/logos-co/spel.git", tag = "v0.7.0" }
+lee_core.workspace = true
+borsh.workspace = true
+sha2.workspace = true
