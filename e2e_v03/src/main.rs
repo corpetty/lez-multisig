@@ -17,6 +17,9 @@
 //! and burns its signers' nonces (`lez/chain_state/src/apply.rs`, "a failed action is
 //! ordinary execution semantics"), and the RPC reports no outcome. So inclusion says nothing
 //! about whether a call took effect: every step here is judged by the state it reads back.
+//! A refused call is charged its whole gas limit (`ValidatedStateDiff::
+//! from_public_transaction_metered`: any failure but a clean non-zero exit bills the budget);
+//! one that succeeds pays for the cycles it ran.
 
 use std::{process::Command, thread::sleep, time::Duration};
 
@@ -155,11 +158,12 @@ fn main() {
     let prop = proposal_pda(&p, &create_key, 1);
     assert!(c.send(&[&ka], vec![mine(&c, &state), mine(&c, &prop), mine(&c, &a)],
         &Instruction::Propose { create_key, index: 1, target: call.clone() }));
+    let b_before = c.native_balance(&b);
     assert!(c.send(&[&kb], vec![mine(&c, &state), mine(&c, &prop), mine(&c, &b)],
         &Instruction::Approve { create_key, index: 1 }));
     let pr: Proposal = borsh::from_slice(&c.shard(&prop, &p)).unwrap();
     assert_eq!(pr.approved, vec![*a.value(), *b.value()]);
-    println!("2. A proposed a transfer of 100 to R; B approved OK");
+    println!("2. A proposed a transfer of 100 to R; B approved (B paid {} in fees) OK", b_before - c.native_balance(&b));
 
     // 3. refusals: an outsider votes; a substituted recipient; another multisig names this vault.
     // Each is judged by the state it would have changed.
