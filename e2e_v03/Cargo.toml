@@ -1,0 +1,18 @@
+[package]
+name = "e2e_v03"
+version = "0.3.0"
+edition = "2024"
+
+# The multisig on a running LEZ v0.3.0 sequencer: create, propose, approve, execute a
+# native transfer out of the vault, and the refusals. Not part of `cargo test`: it needs a
+# chain, a deployed program and a way to fund accounts (see src/main.rs).
+[dependencies]
+multisig_core = { path = "../multisig_core" }
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.3.0", package = "lee" }
+lee_core = { workspace = true, features = ["host"] }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.3.0" }
+borsh.workspace = true
+base64 = "0.22.1"
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+rand = "0.8.5"

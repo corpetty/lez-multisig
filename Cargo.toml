@@ -9,6 +9,7 @@ members = [
     "multisig_program",
     "methods",
     "methods/guest",
+    "e2e_v03",
 ]
 exclude = ["cli", "idl-gen", "lez-multisig-ffi", "e2e_tests"]
 
